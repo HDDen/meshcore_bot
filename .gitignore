@@ -1,0 +1,5 @@
+meshcore_config.json
+.vscode/launch.json
+__pycache__/*
+callbacks.py
+meshcore_packets.log
