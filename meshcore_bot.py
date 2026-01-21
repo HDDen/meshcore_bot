@@ -23,6 +23,7 @@ import requests
 import traceback
 import copy
 from copy import deepcopy
+from functools import partial
 from meshcore import MeshCore
 from meshcore.events import EventType
 from typing import Any, Dict, Optional, Iterable
@@ -277,6 +278,13 @@ class MeshcoreBot:
         return result
 
     # коллбэк на получение сообщения
+    def async_event_callback_on_done(self, task: asyncio.Task, callable_func_name = ""):
+        try:
+            result = task.result()
+            print(f"            Результат вызова {callable_func_name} = {result}")
+        except Exception as e:
+            print(f"            Результат вызова {callable_func_name} = ошибка: \n{e}")
+
     async def message_callback(self, event):
 
         msg_text = event.payload['text']
@@ -372,8 +380,9 @@ class MeshcoreBot:
             # а теперь - обработка внешних коллбэков, завязана на опцию MESH_MESSAGES_CALLBACK_ENABLED
             if self.mesh_messages_callback_enabled == True and isinstance(self.external_callbacks, list) and len(self.external_callbacks):
                 for external_cbk in self.external_callbacks:
-                    external_cbk_result = await external_cbk(self, event)
-                    print(f"            Результат вызова {external_cbk.__name__} = {external_cbk_result}")
+                    # external_cbk_result = await external_cbk(self, event)
+                    # print(f"            Результат вызова {external_cbk.__name__} = {external_cbk_result}")
+                    asyncio.create_task(external_cbk(self, event)).add_done_callback(partial(self.async_event_callback_on_done, callable_func_name=external_cbk.__name__))
 
         else:
             print(f"Сообщение «{msg_text}» получено в канал с отличающимся ch_id ({ch_id} / {self.target_channel_id}), пропускаем его")
