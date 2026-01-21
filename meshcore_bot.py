@@ -38,8 +38,8 @@ CONFIG_PATH = os.path.join(SCRIPT_DIR, "meshcore_config.json")
 DEFAULT_CONFIG = {
     "HTTP_TIMEOUT_SECONDS": 10, # общая опция, таймаут для http-запросов
     "BLE_ADDRESS": "SO:ME:AD:DR:ES:S!", # адрес вашего устройства
-    "HTTP_ADDRESS": "192.168.0.255", # адрес вашего устройства
-    "HTTP_PORT": "5000", # адрес вашего устройства
+    "HTTP_ADDRESS": "0.0.0.0", # TCP-адрес вашего устройства
+    "HTTP_PORT": "5000", # TCP-порт вашего устройства
     "LOG_PACKETS_TO_FILE": False, # логировать mesh-сообщения в файл
     "LOG_PACKETS_TO_CLI": False, # отображать mesh-сообщения в cli
     "SCAN_CHANNELS_LIMIT": 10, # сколько каналов сканировать через ноду при запуске
