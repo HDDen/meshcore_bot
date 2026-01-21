@@ -38,6 +38,8 @@ CONFIG_PATH = os.path.join(SCRIPT_DIR, "meshcore_config.json")
 DEFAULT_CONFIG = {
     "HTTP_TIMEOUT_SECONDS": 10, # общая опция, таймаут для http-запросов
     "BLE_ADDRESS": "SO:ME:AD:DR:ES:S!", # адрес вашего устройства
+    "HTTP_ADDRESS": "192.168.0.255", # адрес вашего устройства
+    "HTTP_PORT": "5000", # адрес вашего устройства
     "LOG_PACKETS_TO_FILE": False, # логировать mesh-сообщения в файл
     "LOG_PACKETS_TO_CLI": False, # отображать mesh-сообщения в cli
     "SCAN_CHANNELS_LIMIT": 10, # сколько каналов сканировать через ноду при запуске
@@ -105,6 +107,8 @@ _config = load_or_create_config(CONFIG_PATH)
 # Присваиваем значения (с запасными значениями из DEFAULT_CONFIG)
 HTTP_TIMEOUT_SECONDS = int(_config.get("HTTP_TIMEOUT_SECONDS", DEFAULT_CONFIG["HTTP_TIMEOUT_SECONDS"]))
 BLE_ADDRESS = _config.get("BLE_ADDRESS", DEFAULT_CONFIG["BLE_ADDRESS"])
+HTTP_ADDRESS = _config.get("HTTP_ADDRESS", DEFAULT_CONFIG["HTTP_ADDRESS"])
+HTTP_PORT = _config.get("HTTP_PORT", DEFAULT_CONFIG["HTTP_PORT"])
 LOG_PACKETS_TO_FILE = bool(_config.get("LOG_PACKETS_TO_FILE", DEFAULT_CONFIG["LOG_PACKETS_TO_FILE"]))
 LOG_PACKETS_TO_CLI = bool(_config.get("LOG_PACKETS_TO_CLI", DEFAULT_CONFIG["LOG_PACKETS_TO_CLI"]))
 SCAN_CHANNELS_LIMIT = int(_config.get("SCAN_CHANNELS_LIMIT", DEFAULT_CONFIG["SCAN_CHANNELS_LIMIT"]))
@@ -959,16 +963,44 @@ async def main():
     # meshcore = await MeshCore.create_serial(args.port, args.baud, debug=True)
 
     global meshcore
-    meshcore = await MeshCore.create_ble(BLE_ADDRESS)
     
-    # Connection is already established
-    # success = True
-    # if not success:
-    #     print("Failed to connect to MeshCore device {BLE_ADDRESS}")
-    #     return
-        
-    device_name = meshcore.self_info.get('name')
-    print(f"Connected to MeshCore device {device_name} ({BLE_ADDRESS})")
+    if BLE_ADDRESS != _config.get("BLE_ADDRESS", DEFAULT_CONFIG["BLE_ADDRESS"]) and BLE_ADDRESS != "":
+        meshcore = await MeshCore.create_ble(BLE_ADDRESS)
+
+        if meshcore.is_connected:
+            device_name = meshcore.self_info.get('name')
+            print(f"Connected to MeshCore device {device_name} via BLE ({BLE_ADDRESS})")
+        else:
+            print("Failed to connect to MeshCore device via BLE {BLE_ADDRESS}")
+
+    if meshcore is None and HTTP_ADDRESS and HTTP_PORT:
+        meshcore = await MeshCore.create_tcp(
+            HTTP_ADDRESS, HTTP_PORT,
+            auto_reconnect=True,
+            max_reconnect_attempts=5)
+
+        if meshcore.is_connected:
+            device_name = meshcore.self_info.get('name')
+            print(f"Connected to MeshCore device {device_name} via TCP ({HTTP_ADDRESS}:{HTTP_PORT})")
+        else:
+            print("Failed to connect to MeshCore device via TCP {HTTP_ADDRESS}:{HTTP_PORT}")
+
+    if not meshcore.is_connected:
+        return
+    
+    # # Subscribe to connection events
+    # async def on_connected(event):
+    #     print(f"Connected: {event.payload}")
+    #     if event.payload.get('reconnected'):
+    #         print("Successfully reconnected!")
+    #
+    # async def on_disconnected(event):
+    #     print(f"Disconnected: {event.payload['reason']}")
+    #     if event.payload.get('max_attempts_exceeded'):
+    #         print("Max reconnection attempts exceeded")
+    #
+    # meshcore.subscribe(EventType.CONNECTED, on_connected)
+    # meshcore.subscribe(EventType.DISCONNECTED, on_disconnected)
 
     # выведем в консоль инфу о ноде
     device_info = meshcore.self_info.copy()
