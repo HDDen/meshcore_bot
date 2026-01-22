@@ -23,6 +23,7 @@ import requests
 import urllib3
 import traceback
 import copy
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from copy import deepcopy
 from functools import partial
 from meshcore import MeshCore
@@ -54,7 +55,7 @@ DEFAULT_CONFIG = {
                 # "https://domain.ru/any/path/prepollCallbackOne.php?token=aaaaaaaa", 
                 # "https://domain.ru/any/path/prepollCallbackTwo.php?token=aaaaaaaa"
             ],
-            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php?token=aaaaaaaa", # отсюда забираем сообщения от внешнего источника, можно оставить пустым. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
+            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php?token=aaaaaaaa", # отсюда забираем сообщения от внешнего источника, можно оставить пустым. Желательно передать явно get-параметр &chat_id=... . Если не будет передан - возьмётся из экземпляра конфига. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
             "HTTP_SEND_URL": "https://domain.ru/any/path/sendMsgs.php?token=aaaaaaaa", # на этот url отправляются полученные из mesh сообщения, можно оставить пустым. Отправляется POST с телом {"msg": "Foobar2", "channel_id": -100123456789}, массив сообщений не поддерживается - отправляем по одному
             "HTTP_POLL_PERIOD_SECONDS": 30, # период, с которым опрашивается HTTP_POLL_URL
             "HTTP_IGNORE_SSL_ERRORS": False,
@@ -148,6 +149,10 @@ class MeshcoreBot:
         )
         self.polled_message_maxlength = int(self.config.get("POLLED_MESSAGE_MAXLENGTH", 130))
         self.tg_target_channel_id = str(self.config.get("TG_TARGET_CHANNEL_ID", ""))
+        # апдейт - добавляем в self.http_poll_url get-параметр chat_id = self.tg_target_channel_id
+        if self.http_poll_url:
+            self.http_poll_url = self.check_and_add_chatid_to_url(self.http_poll_url, self.tg_target_channel_id)
+        #
         self.try_trim_nodename = bool(self.config.get("TRY_TRIM_NODENAME", True))
         self.tg_remove_tgnames_vowel = bool(self.config.get("TG_REMOVE_TGNAMES_VOWEL", True))
         self.tg_short_tgnames = bool(self.config.get("TG_SHORT_TGNAMES", True))
@@ -654,7 +659,17 @@ class MeshcoreBot:
                     name = str(msgobj.get("name", ""))
                     date = str(msgobj.get("date", ""))
                     text = str(msgobj.get("msg", ""))
+                    chat_id = str(msgobj.get("chat_id", ""))
                     if not text:
+                        print("send_polled_to_mesh(): пропускаем сообщение, т.к. не задан text")
+                        continue
+
+                    if not chat_id:
+                        print("send_polled_to_mesh(): пропускаем сообщение, т.к. не задан chat_id")
+                        continue
+
+                    if str(chat_id) != self.tg_target_channel_id:
+                        print(f"send_polled_to_mesh(): chat_id ({chat_id}) не совпадает с self.tg_target_channel_id ({self.tg_target_channel_id}), пропускаем")
                         continue
 
                     if name in self.ignored_poll_names:
@@ -966,6 +981,24 @@ class MeshcoreBot:
         if self.channel_subscription:
             self.meshcore.unsubscribe(self.channel_subscription)
             print(f"Unsubscribed events on worker #{self.worker_index}")
+
+    def check_and_add_chatid_to_url(self, url, chat_id_to_add):
+
+        # Разбираем URL
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+
+        # Проверяем наличие chat_id
+        if "chat_id" not in query:
+            query["chat_id"] = [chat_id_to_add]
+
+        # Собираем обратно query-строку
+        new_query = urlencode(query, doseq=True)
+
+        # Собираем новый URL
+        new_url = urlunparse(parsed._replace(query=new_query))
+
+        return new_url
 
 async def main():
     # parser = argparse.ArgumentParser(description="MeshCore Pub-Sub Example")
