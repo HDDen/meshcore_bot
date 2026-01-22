@@ -20,6 +20,7 @@ import time
 import re
 import logging
 import requests
+import urllib3
 import traceback
 import copy
 from copy import deepcopy
@@ -56,6 +57,7 @@ DEFAULT_CONFIG = {
             "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php?token=aaaaaaaa", # отсюда забираем сообщения от внешнего источника, можно оставить пустым. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
             "HTTP_SEND_URL": "https://domain.ru/any/path/sendMsgs.php?token=aaaaaaaa", # на этот url отправляются полученные из mesh сообщения, можно оставить пустым. Отправляется POST с телом {"msg": "Foobar2", "channel_id": -100123456789}, массив сообщений не поддерживается - отправляем по одному
             "HTTP_POLL_PERIOD_SECONDS": 30, # период, с которым опрашивается HTTP_POLL_URL
+            "HTTP_IGNORE_SSL_ERRORS": False,
             "IGNORED_POLL_NAMES": [ # не пересылать сообщения от пользователей с такими именами извне в mesh
                 # "SomeOtherUser"
             ],
@@ -138,6 +140,7 @@ class MeshcoreBot:
         self.work_on_broadcast_mesh_channel = bool(self.config.get("WORK_ON_BROADCAST_MESH_CHANNEL", False))
         self.http_send_url = self.config.get("HTTP_SEND_URL", "")
         self.http_poll_url = self.config.get("HTTP_POLL_URL", "")
+        self.http_ignore_ssl_errors = self.config.get("HTTP_IGNORE_SSL_ERRORS", "")
         self.ignored_poll_names = set(
             str(x) for x in self.config.get(
                 "IGNORED_POLL_NAMES", []
@@ -504,10 +507,14 @@ class MeshcoreBot:
 
         try:
             logger.info("Отправка сообщения во внешнюю систему: %s, обрезка имени = %s", payload, self.try_trim_nodename)
+
+            verify_ssl = not self.http_ignore_ssl_errors
+
             resp = requests.post(
                 self.http_send_url,
                 json=payload,
                 timeout=10,
+                verify=verify_ssl
             )
             if resp.status_code == 200:
                 logger.info("Сообщение успешно отправлено во внешнюю систему.\n")
@@ -534,6 +541,8 @@ class MeshcoreBot:
         if not self.http_prepoll_url:
             logger.info("self.http_prepoll_url не задан — pre-poll пропущен.")
             return
+        
+        verify_ssl = not self.http_ignore_ssl_errors
 
         for poll_url in self.http_prepoll_url:
             if not poll_url:
@@ -541,7 +550,7 @@ class MeshcoreBot:
             else:
                 logger.info("Выполняется HTTP pre-poll GET -> %s", poll_url)
                 try:
-                    resp = requests.get(poll_url, timeout=HTTP_TIMEOUT_SECONDS)
+                    resp = requests.get(poll_url, timeout=HTTP_TIMEOUT_SECONDS, verify=verify_ssl)
                     resp.raise_for_status()
                     try:
                         data = resp.json()
@@ -914,6 +923,8 @@ class MeshcoreBot:
         if int(self.http_poll_period_seconds) < 5:
             self.http_poll_period_seconds = 10
 
+        verify_ssl = not self.http_ignore_ssl_errors
+
         logger.info("Запуск фоновой задачи: интервал = %s сек.", self.http_poll_period_seconds)
 
         while True:
@@ -924,7 +935,7 @@ class MeshcoreBot:
                     logger.debug("self.http_poll_url не задан. Пропускаем попытку.")
                 else:
                     logger.debug("HTTP GET -> %s", self.http_poll_url)
-                    resp = requests.get(self.http_poll_url, timeout=HTTP_TIMEOUT_SECONDS)
+                    resp = requests.get(self.http_poll_url, timeout=HTTP_TIMEOUT_SECONDS, verify=verify_ssl)
                     if resp.status_code == 200:
                         try:
                             data = resp.json()
