@@ -53,7 +53,7 @@ DEFAULT_CONFIG = {
                 # "https://domain.ru/any/path/prepollCallbackOne.php?token=aaaaaaaa", 
                 # "https://domain.ru/any/path/prepollCallbackTwo.php?token=aaaaaaaa"
             ],
-            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php?token=aaaaaaaa", # отсюда забираем сообщения от внешнего источника, можно оставить пустым. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo"},{"name":"Bob","date":"18.01 19:44","msg":"Bar"}]}
+            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php?token=aaaaaaaa", # отсюда забираем сообщения от внешнего источника, можно оставить пустым. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
             "HTTP_SEND_URL": "https://domain.ru/any/path/sendMsgs.php?token=aaaaaaaa", # на этот url отправляются полученные из mesh сообщения, можно оставить пустым. Отправляется POST с телом {"msg": "Foobar2", "channel_id": -100123456789}, массив сообщений не поддерживается - отправляем по одному
             "HTTP_POLL_PERIOD_SECONDS": 30, # период, с которым опрашивается HTTP_POLL_URL
             "IGNORED_POLL_NAMES": [ # не пересылать сообщения от пользователей с такими именами извне в mesh
