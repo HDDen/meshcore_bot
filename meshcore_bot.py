@@ -56,7 +56,7 @@ DEFAULT_CONFIG = {
                 # "https://domain.ru/any/path/prepollCallbackOne.php", 
                 # "https://domain.ru/any/path/prepollCallbackTwo.php"
             ],
-            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php", # POST с токеном внутри. Отсюда забираем сообщения от внешнего источника, можно оставить пустым. Желательно передать явно get-параметр &chat_id=... . Если не будет передан - возьмётся из экземпляра конфига. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
+            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php", # POST с токеном внутри. Отсюда забираем сообщения от внешнего источника, можно оставить пустым. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
             "HTTP_SEND_URL": "https://domain.ru/any/path/sendMsgs.php", # на этот url отправляются полученные из mesh сообщения, можно оставить пустым. Отправляется POST с телом {"token": "...", "msg": "Foobar2", "channel_id": -100123456789}, массив сообщений не поддерживается - отправляем по одному
             "HTTP_POLL_PERIOD_SECONDS": 30, # период, с которым опрашивается HTTP_POLL_URL
             "HTTP_IGNORE_SSL_ERRORS": False,
@@ -151,10 +151,6 @@ class MeshcoreBot:
         )
         self.polled_message_maxlength = int(self.config.get("POLLED_MESSAGE_MAXLENGTH", 130))
         self.tg_target_channel_id = str(self.config.get("TG_TARGET_CHANNEL_ID", ""))
-        # апдейт - добавляем в self.http_poll_url get-параметр chat_id = self.tg_target_channel_id
-        if self.http_poll_url:
-            self.http_poll_url = self.check_and_add_chatid_to_url(self.http_poll_url, self.tg_target_channel_id)
-        #
         self.try_trim_nodename = bool(self.config.get("TRY_TRIM_NODENAME", True))
         self.tg_remove_tgnames_vowel = bool(self.config.get("TG_REMOVE_TGNAMES_VOWEL", True))
         self.tg_short_tgnames = bool(self.config.get("TG_SHORT_TGNAMES", True))
@@ -184,10 +180,11 @@ class MeshcoreBot:
         self.external_callbacks = [] # здесь храним коллбэки
 
         # нужно проверить существование токена
-        if not self.http_token:
-            print(f"self.http_token не задан, не стартуем воркер")
-            self.selfcheck_is_correct = False
-            return False
+        # закомментируем, т.к. на конфигах с только mesh-каналами и ботами для них токен задан не будет, соотв. воркер не стартанет
+        # if not self.http_token:
+        #     print(f"self.http_token не задан, не стартуем воркер")
+        #     self.selfcheck_is_correct = False
+        #     return None
         
         self.selfcheck_is_correct = True
 
@@ -199,7 +196,6 @@ class MeshcoreBot:
 
         # Инициализация класса прошла
         print(f"Ok. Создан экземпляр {self.worker_index} = \n", json.dumps(self.config, indent=4, ensure_ascii=False, default=str))
-        return True
 
     async def async_init(self):
         result = False
@@ -976,7 +972,8 @@ class MeshcoreBot:
 
                     # выполняем запрос
                     payload = {
-                        "token": self.http_token
+                        "token": self.http_token,
+                        "chat_id": self.tg_target_channel_id
                     }
                     resp = do_post_request(self.http_poll_url, payload, HTTP_TIMEOUT_SECONDS, verify_ssl)
                     if resp:
@@ -1012,24 +1009,6 @@ class MeshcoreBot:
             self.meshcore.unsubscribe(self.channel_subscription)
             print(f"Unsubscribed events on worker #{self.worker_index}")
 
-    def check_and_add_chatid_to_url(self, url, chat_id_to_add):
-
-        # Разбираем URL
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
-
-        # Проверяем наличие chat_id
-        if "chat_id" not in query:
-            query["chat_id"] = [chat_id_to_add]
-
-        # Собираем обратно query-строку
-        new_query = urlencode(query, doseq=True)
-
-        # Собираем новый URL
-        new_url = urlunparse(parsed._replace(query=new_query))
-
-        return new_url
-
 # заменяет значения переданных ключей в плоском объекте на плейсхолдер, полезно для последующего вывода в лог
 def protect_dict_values(src_dict: dict, keys_list: list, placeholder: str = "***"):
 
@@ -1062,11 +1041,11 @@ def do_post_request(url: str, payload: Optional[dict] = None, timeout: int = 10,
         try:
             result = resp.json()
         except ValueError:
-            logger.warning("do_post_request(): ответ не является JSON: %s", resp.text[:500])
+            print("do_post_request(): ответ не является JSON: %s", resp.text[:500])
             result = resp.text
 
-    except requests.exceptions.RequestException:
-        logger.exception("do_post_request(): POST завершился с ошибкой или таймаутом")
+    except Exception as e:
+        print(f"do_post_request(): POST завершился с ошибкой или таймаутом: \n{e}")
         result = None
 
     return result
@@ -1181,8 +1160,11 @@ async def main():
             try:
                 # создадим экземпляр воркера
                 bot = MeshcoreBot(meshcore, worker_index, worker_cfg)
-                await bot.async_init()
-                WORKERS.insert(worker_index, bot)
+                if getattr(bot, "selfcheck_is_correct", False):
+                    await bot.async_init()
+                    WORKERS.insert(worker_index, bot)
+                else:
+                    print(f"У воркера #{worker_index} selfcheck_is_correct не равен true, пропускаем")
             except Exception as e:
                 print(f"Произошла ошибка: {e}")
                 tb = traceback.format_exc()
