@@ -28,9 +28,8 @@ from copy import deepcopy
 from functools import partial
 from meshcore import MeshCore
 from meshcore.events import EventType
-from typing import Any, Dict, Optional, Iterable
+from typing import Any, Dict, Optional, Iterable, List, Union
 from datetime import datetime
-from typing import List
 
 # Путь к конфигу рядом со скриптом
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,20 +49,21 @@ DEFAULT_CONFIG = {
     "WORK_ON": [
         {
             "TARGET_CHANNEL_NAME": "MyChannel", # имя mesh-канала, в который и из которого пересылаем сообщения
+            "TG_TARGET_CHANNEL_ID": "", # id группы, для которой предназначаются сообщения из mesh, например -100555555555 или @username. Нужно для tg
             "WORK_ON_BROADCAST_MESH_CHANNEL": False, # если индекс mesh-канала будет равен 0, это сработает как дополнительная проверка, не дающая пересылать сообщения из внешней системы в него
-            "HTTP_PREPOLL_URL": [ # эти коллбэки выполняются перед запуском скрипта
-                # "https://domain.ru/any/path/prepollCallbackOne.php?token=aaaaaaaa", 
-                # "https://domain.ru/any/path/prepollCallbackTwo.php?token=aaaaaaaa"
+            "HTTP_TOKEN": "", # токен для HTTP-запросов, передается внутри POST в json {"token": "..."}
+            "HTTP_PREPOLL_URL": [ # эти коллбэки выполняются перед запуском скрипта. Выполняется POST-запрос с json {"token": "..."}
+                # "https://domain.ru/any/path/prepollCallbackOne.php", 
+                # "https://domain.ru/any/path/prepollCallbackTwo.php"
             ],
-            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php?token=aaaaaaaa", # отсюда забираем сообщения от внешнего источника, можно оставить пустым. Желательно передать явно get-параметр &chat_id=... . Если не будет передан - возьмётся из экземпляра конфига. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
-            "HTTP_SEND_URL": "https://domain.ru/any/path/sendMsgs.php?token=aaaaaaaa", # на этот url отправляются полученные из mesh сообщения, можно оставить пустым. Отправляется POST с телом {"msg": "Foobar2", "channel_id": -100123456789}, массив сообщений не поддерживается - отправляем по одному
+            "HTTP_POLL_URL": "https://domain.ru/any/path/getMsgs.php", # POST с токеном внутри. Отсюда забираем сообщения от внешнего источника, можно оставить пустым. Ожидается ответ вида {"messages":[{"name":"Alice","date":"18.01 19:44","msg":"Foo","chat_id": "-10055555555"},{"name":"Bob","date":"18.01 19:44","msg":"Bar","chat_id": "-10055555555"}]}
+            "HTTP_SEND_URL": "https://domain.ru/any/path/sendMsgs.php", # на этот url отправляются полученные из mesh сообщения, можно оставить пустым. Отправляется POST с телом {"token": "...", "msg": "Foobar2", "channel_id": -100123456789}, массив сообщений не поддерживается - отправляем по одному
             "HTTP_POLL_PERIOD_SECONDS": 30, # период, с которым опрашивается HTTP_POLL_URL
             "HTTP_IGNORE_SSL_ERRORS": False,
             "IGNORED_POLL_NAMES": [ # не пересылать сообщения от пользователей с такими именами извне в mesh
                 # "SomeOtherUser"
             ],
             "POLLED_MESSAGE_MAXLENGTH": 130, # количество байт в кодировке UTF-8 (не символов!) в сообщениях для Mesh. Эмодзи - 4 байта, кириллица - 2, латиница и знаки препинания - 1. Протестировано до 142, дальше 100% что-то бьётся
-            "TG_TARGET_CHANNEL_ID": "-100555555555", # id группы, для которой предназначаются сообщения из mesh. Нужно для tg
             "TRY_TRIM_NODENAME": True, # вырезать имя ноды из пересылаемого во внешнюю систему сообщения
             "TG_REMOVE_TGNAMES_VOWEL": True, # при пересылке сообщения извне в mesh удалять из ника отправителя гласные, для экономии полезного пространства в сообщении
             "TG_SHORT_TGNAMES": True, # сокращать внешние ники до 4 символов
@@ -134,6 +134,8 @@ class MeshcoreBot:
 
         # нужно разобрать настройки
 
+        self.selfcheck_is_correct = False
+        self.http_token = self.config.get("HTTP_TOKEN", "")
         self.http_prepoll_url = self.config.get("HTTP_PREPOLL_URL", [])
         self.http_poll_period_seconds = int(self.config.get("HTTP_POLL_PERIOD_SECONDS", 30))
         self.target_channel_name = self.config.get("TARGET_CHANNEL_NAME", "DummyRandomChannelNameDontChangeItHere")
@@ -149,10 +151,6 @@ class MeshcoreBot:
         )
         self.polled_message_maxlength = int(self.config.get("POLLED_MESSAGE_MAXLENGTH", 130))
         self.tg_target_channel_id = str(self.config.get("TG_TARGET_CHANNEL_ID", ""))
-        # апдейт - добавляем в self.http_poll_url get-параметр chat_id = self.tg_target_channel_id
-        if self.http_poll_url:
-            self.http_poll_url = self.check_and_add_chatid_to_url(self.http_poll_url, self.tg_target_channel_id)
-        #
         self.try_trim_nodename = bool(self.config.get("TRY_TRIM_NODENAME", True))
         self.tg_remove_tgnames_vowel = bool(self.config.get("TG_REMOVE_TGNAMES_VOWEL", True))
         self.tg_short_tgnames = bool(self.config.get("TG_SHORT_TGNAMES", True))
@@ -181,6 +179,15 @@ class MeshcoreBot:
         )
         self.external_callbacks = [] # здесь храним коллбэки
 
+        # нужно проверить существование токена
+        # закомментируем, т.к. на конфигах с только mesh-каналами и ботами для них токен задан не будет, соотв. воркер не стартанет
+        # if not self.http_token:
+        #     print(f"self.http_token не задан, не стартуем воркер")
+        #     self.selfcheck_is_correct = False
+        #     return None
+        
+        self.selfcheck_is_correct = True
+
         # cache of already sent poll messages to avoid duplicates
         self.sent_messages_cache: set[str] = set()
 
@@ -193,13 +200,18 @@ class MeshcoreBot:
     async def async_init(self):
         result = False
 
+        if not self.selfcheck_is_correct:
+            result = False
+            print(f"async_init(): не выполняем загрузку, self.selfcheck_is_correct == False, async_init от worker #{self.worker_index}")
+            return result
+
         # получить каналы, найти целевой
         target_chid = await self.search_target_ch_idx(meshcore)
 
         if target_chid is not None:
             self.target_channel_id = int(target_chid)
         else:
-            print("Не удалось найти индекс канала с целевым именем, завершаемся")
+            print("async_init(): Не удалось найти индекс канала с целевым именем, завершаемся")
             result = False
             return result
             #raise RuntimeError("Прерываем выполнение")
@@ -208,7 +220,7 @@ class MeshcoreBot:
         if self.target_channel_id is not None:
 
             if self.target_channel_id == 0 and self.work_on_broadcast_mesh_channel is not True:
-                print(f"\nWorker #{self.worker_index}: self.target_channel_id = 0, but self.work_on_broadcast_mesh_channel != true. Exit")
+                print(f"\nasync_init(): Worker #{self.worker_index}: self.target_channel_id = 0, but self.work_on_broadcast_mesh_channel != true. Exit")
                 result = False
             else:
                 # установка внешних коллбэков
@@ -220,17 +232,17 @@ class MeshcoreBot:
                     if os.path.isfile(self.mesh_messages_callback_file) and os.access(self.mesh_messages_callback_file, os.R_OK):
                         if isinstance(self.mesh_messages_callback_list, set) and len(self.mesh_messages_callback_list):
                             loaded = self.load_callbacks_from_file()
-                            logger.info(f"Результат self.load_callbacks_from_file(): {loaded}")
+                            logger.info(f"async_init(): Результат self.load_callbacks_from_file(): {loaded}")
                         else:
-                            logger.warning("Файл %s прочитан, но не имеет коллбэков", self.mesh_messages_callback_file)
+                            logger.warning("async_init(): Файл %s прочитан, но не имеет коллбэков", self.mesh_messages_callback_file)
                     else:
-                        logger.warning("Невозможно загрузить внешние коллбэки - файл %s недоступен для чтения или не существует", self.mesh_messages_callback_file)
+                        logger.warning("async_init(): Невозможно загрузить внешние коллбэки - файл %s недоступен для чтения или не существует", self.mesh_messages_callback_file)
 
 
                 # Subscribe to channel messages
                 self.channel_subscription = meshcore.subscribe(EventType.CHANNEL_MSG_RECV, self.message_callback, attribute_filters={"channel_idx": self.target_channel_id},)
 
-                print(f"\nWorker #{self.worker_index}: Subscribed to events:")
+                print(f"\nasync_init(): Worker #{self.worker_index}: Subscribed to events:")
                 print(f"- Channel messages (target ch_id (real) = {target_chid}, ch_name (from config) = {self.target_channel_name})")
 
                 # Запускаем фоновую задачу опроса poll_url
@@ -239,7 +251,7 @@ class MeshcoreBot:
                 result = True
         
         # Инициализация класса прошла
-        print(f"Ok. Выполнена async_init от worker #{self.worker_index}")
+        print(f"async_init() Ok. Выполнена async_init от worker #{self.worker_index}")
         
         return result
     
@@ -502,26 +514,34 @@ class MeshcoreBot:
             )
             return result
         
+        if not self.http_token:
+            logger.debug(
+                "self.http_token не задан — отправка во внешнюю систему пропущена."
+            )
+            return result
+        
         # обрезка имени ноды
         text = self.remove_node_name_from_msg(text)
 
         payload = {
+            "token": self.http_token,
             "msg": text,
             "channel_id": self.tg_target_channel_id,
         }
 
         try:
-            logger.info("Отправка сообщения во внешнюю систему: %s, обрезка имени = %s", payload, self.try_trim_nodename)
+
+            # выведем инфо в консоль - для этого скопируем payload, чтобы не показывать токен
+            payload_for_log = protect_dict_values(payload, ["token"])
+
+            # выведем в консоль инфу о ноде
+            logger.info("Отправка сообщения во внешнюю систему: %s, обрезка имени = %s", payload_for_log, self.try_trim_nodename)
 
             verify_ssl = not self.http_ignore_ssl_errors
 
-            resp = requests.post(
-                self.http_send_url,
-                json=payload,
-                timeout=10,
-                verify=verify_ssl
-            )
-            if resp.status_code == 200:
+            # выполняем запрос
+            resp = do_post_request(self.http_send_url, payload, HTTP_TIMEOUT_SECONDS, verify_ssl)
+            if resp:
                 logger.info("Сообщение успешно отправлено во внешнюю систему.\n")
                 result = True
             else:
@@ -531,6 +551,7 @@ class MeshcoreBot:
                     resp.text[:200],
                 )
                 result = False
+                
         except Exception as exc:
             logger.exception(
                 "Ошибка при отправке сообщения во внешнюю систему: %s\n", exc
@@ -542,7 +563,7 @@ class MeshcoreBot:
             return result
         
     def prepoll_cbk(self):
-        """Блокирующий HTTP GET перед стартом основного клиента."""
+        """Блокирующий HTTP POST перед стартом основного клиента."""
         if not self.http_prepoll_url:
             logger.info("self.http_prepoll_url не задан — pre-poll пропущен.")
             return
@@ -553,21 +574,20 @@ class MeshcoreBot:
             if not poll_url:
                 continue
             else:
-                logger.info("Выполняется HTTP pre-poll GET -> %s", poll_url)
-                try:
-                    resp = requests.get(poll_url, timeout=HTTP_TIMEOUT_SECONDS, verify=verify_ssl)
-                    resp.raise_for_status()
-                    try:
-                        data = resp.json()
-                        logger.info("HTTP pre-poll JSON ответ:\n%s", json.dumps(data, ensure_ascii=False, indent=2))
-                    except ValueError:
-                        logger.warning("HTTP pre-poll ответ не является JSON: %s", resp.text[:500])
-                        tb = traceback.format_exc()
-                        print(tb)
-                except Exception as exc:
-                    logger.warning("HTTP pre-poll завершился с ошибкой или таймаутом: %s", exc)
-                    tb = traceback.format_exc()
-                    print(tb)
+                logger.info("Выполняется HTTP pre-poll POST -> %s", poll_url)
+
+                # выполняем запрос
+                payload = {
+                    "token": self.http_token
+                }
+                resp = do_post_request(poll_url, payload, HTTP_TIMEOUT_SECONDS, verify_ssl)
+                if resp:
+                    if isinstance(resp, dict):
+                        logger.info("HTTP pre-poll JSON ответ:\n%s", json.dumps(resp, ensure_ascii=False, indent=2))
+                    else:
+                        logger.warning("HTTP pre-poll ответ не является JSON: %s", resp)
+                else:
+                    logger.warning("HTTP pre-poll запрос неудачный: resp=", resp)
 
     def log_packet_to_file(self, debug_data: dict) -> None:
         # logger = logging.getLogger("meshcore_client")
@@ -944,32 +964,39 @@ class MeshcoreBot:
 
         while True:
             # выполняем действие
-            # HTTP GET — аккуратная обработка статусов
             try:
                 if not self.http_poll_url:
                     logger.debug("self.http_poll_url не задан. Пропускаем попытку.")
                 else:
-                    logger.debug("HTTP GET -> %s", self.http_poll_url)
-                    resp = requests.get(self.http_poll_url, timeout=HTTP_TIMEOUT_SECONDS, verify=verify_ssl)
-                    if resp.status_code == 200:
-                        try:
-                            data = resp.json()
-                            logger.debug("HTTP GET JSON: %s", json.dumps(data, ensure_ascii=False)[:1000])
-                            if isinstance(data, dict) and "messages" in data and isinstance(data["messages"], list) and data["messages"]:
+                    logger.debug("HTTP POST -> %s", self.http_poll_url)
+
+                    # выполняем запрос
+                    payload = {
+                        "token": self.http_token,
+                        "chat_id": self.tg_target_channel_id
+                    }
+                    resp = do_post_request(self.http_poll_url, payload, HTTP_TIMEOUT_SECONDS, verify_ssl)
+                    if resp:
+                        if isinstance(resp, dict):
+                            # успешный запрос к poll-url, и получили json
+                            logger.debug("HTTP POST для poll-URL: %s", json.dumps(resp, ensure_ascii=False)[:1000])
+
+                            # если есть messages внутри полученного json, продолжаем работу
+                            if "messages" in resp and isinstance(resp["messages"], list) and resp["messages"]:
                                 # вызов функции с отправкой текста в meshcore-канал
                                 print("\n\n\n*************************************************************\nПолучены сообщения из HTTP, передаем в send_polled_to_mesh() на дальнейшую проверку")
-                                await self.send_polled_to_mesh(data["messages"], meshcore)
+                                await self.send_polled_to_mesh(resp["messages"], meshcore)
                             else:
                                 logger.debug("JSON не содержит 'messages' как список — ничего не отправляем.")
-                        except ValueError:
-                            logger.warning("HTTP GET ответ не является JSON: %s", resp.text[:200])
-                            tb = traceback.format_exc()
-                            print(tb)
+                        else:
+                            # успешный запрос к poll-url, но получили что-то другое
+                            logger.warning("HTTP POST для poll-URL ответ не является JSON: %s", resp)
                     else:
-                        logger.warning("HTTP GET вернул статус %s для URL %s", resp.status_code, self.http_poll_url)
+                        # неуспешный запрос к poll-url
+                        logger.warning("HTTP POST для poll-URL %s завершился неудачей", self.http_poll_url)
                             
             except Exception as exc:
-                logger.exception("Ошибка при HTTP GET: %s", exc)
+                logger.exception("Ошибка при HTTP POST для poll-URL: %s", exc)
                 tb = traceback.format_exc()
                 print(tb)
 
@@ -982,23 +1009,46 @@ class MeshcoreBot:
             self.meshcore.unsubscribe(self.channel_subscription)
             print(f"Unsubscribed events on worker #{self.worker_index}")
 
-    def check_and_add_chatid_to_url(self, url, chat_id_to_add):
+# заменяет значения переданных ключей в плоском объекте на плейсхолдер, полезно для последующего вывода в лог
+def protect_dict_values(src_dict: dict, keys_list: list, placeholder: str = "***"):
 
-        # Разбираем URL
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
+    for_log = src_dict.copy()
 
-        # Проверяем наличие chat_id
-        if "chat_id" not in query:
-            query["chat_id"] = [chat_id_to_add]
+    if keys_list:
+        for index, item in enumerate(keys_list):
+            for_log[item] = '***'
+    
+    return for_log
 
-        # Собираем обратно query-строку
-        new_query = urlencode(query, doseq=True)
+# выполняет POST-запрос, отправляет переданный json, при успехе возвращает ответ в виде dict
+# При ошибке возвращает None
+def do_post_request(url: str, payload: Optional[dict] = None, timeout: int = 10, verify_ssl: bool = True) -> Optional[Union[dict, str]]:
 
-        # Собираем новый URL
-        new_url = urlunparse(parsed._replace(query=new_query))
+    result = None
 
-        return new_url
+    if payload is None:
+        payload = {}
+
+    try:
+        resp = requests.post(
+            url,
+            json=payload,
+            timeout=timeout,
+            verify=verify_ssl
+        )
+        resp.raise_for_status() # проверка if resp.status_code == 200: не нужна, raise_for_status() выбрасывает исключение requests.exceptions.HTTPError, если статус-код 4xx или 5xx (ошибка клиента или сервера).
+
+        try:
+            result = resp.json()
+        except ValueError:
+            print("do_post_request(): ответ не является JSON: %s", resp.text[:500])
+            result = resp.text
+
+    except Exception as e:
+        print(f"do_post_request(): POST завершился с ошибкой или таймаутом: \n{e}")
+        result = None
+
+    return result
 
 async def main():
     # parser = argparse.ArgumentParser(description="MeshCore Pub-Sub Example")
@@ -1110,8 +1160,11 @@ async def main():
             try:
                 # создадим экземпляр воркера
                 bot = MeshcoreBot(meshcore, worker_index, worker_cfg)
-                await bot.async_init()
-                WORKERS.insert(worker_index, bot)
+                if getattr(bot, "selfcheck_is_correct", False):
+                    await bot.async_init()
+                    WORKERS.insert(worker_index, bot)
+                else:
+                    print(f"У воркера #{worker_index} selfcheck_is_correct не равен true, пропускаем")
             except Exception as e:
                 print(f"Произошла ошибка: {e}")
                 tb = traceback.format_exc()
