@@ -313,7 +313,7 @@ class MeshcoreBot:
         # Subscribe to private messages
         self.channel_subscription = meshcore.subscribe(EventType.CONTACT_MSG_RECV, self.pm_callback)
 
-        print(f"\async_init_pm(): Worker #{self.worker_index}: Subscribed to private msgs")
+        print(f"\nasync_init_pm(): Worker #{self.worker_index}: Subscribed to private msgs")
 
         result = True
         
