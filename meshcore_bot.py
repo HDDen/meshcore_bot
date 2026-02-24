@@ -23,6 +23,7 @@ import requests
 import urllib3
 import traceback
 import copy
+import hashlib
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from copy import deepcopy
 from functools import partial
@@ -44,6 +45,7 @@ DEFAULT_CONFIG = {
     "HTTP_PORT": "5000", # TCP-порт вашего устройства
     "LOG_PACKETS_TO_FILE": False, # логировать mesh-сообщения в файл
     "LOG_PACKETS_TO_CLI": False, # отображать mesh-сообщения в cli
+    "LOG_PM_PACKETS_TO_FILE": False, # логировать личные mesh-сообщения в файл
     "SCAN_CHANNELS_LIMIT": 10, # сколько каналов сканировать через ноду при запуске
     # массив воркеров. Каждая секция { ... }, { ... } отвечает за свой Mesh-канал, имя которого совпадает с указанным в секции в параметре TARGET_CHANNEL_NAME - например, Public
     "WORK_ON": [
@@ -81,8 +83,16 @@ DEFAULT_CONFIG = {
             "MESH_MESSAGES_CALLBACK_ENABLED": False,
             "MESH_MESSAGES_CALLBACK_FILE": "callbacks.py", # путь к файлу с коллбэками. Должен лежать либо рядом со скриптом, либо во вложенной папке
             "MESH_MESSAGES_CALLBACK_LIST": ["example_callback"], # массив имен коллбэков, которые будут подписаны на получение сообщений. Логика ответа не зависит от regexp выше, и должна реализовываться самостоятельно! Проверяется только соответствие канала полученного сообщения целевому
-        }
-    ]
+        },
+
+    ],
+    "WORK_ON_PRIVATE_MSGS": False, # работать на личных сообщениях
+    "PRIVATE_MSGS_CFG": {
+        # внешняя подключаемая логика.
+        "MESH_MESSAGES_CALLBACK_ENABLED": False,
+        "MESH_MESSAGES_CALLBACK_FILE": "callbacks_pm.py",
+        "MESH_MESSAGES_CALLBACK_LIST": ["example_pm_callback"], # фильтрация "кому отвечать" должна реализовываться в самом коллбэке
+    }
 }
 
 def load_or_create_config(path: str) -> dict:
@@ -115,8 +125,11 @@ HTTP_ADDRESS = _config.get("HTTP_ADDRESS", DEFAULT_CONFIG["HTTP_ADDRESS"])
 HTTP_PORT = _config.get("HTTP_PORT", DEFAULT_CONFIG["HTTP_PORT"])
 LOG_PACKETS_TO_FILE = bool(_config.get("LOG_PACKETS_TO_FILE", DEFAULT_CONFIG["LOG_PACKETS_TO_FILE"]))
 LOG_PACKETS_TO_CLI = bool(_config.get("LOG_PACKETS_TO_CLI", DEFAULT_CONFIG["LOG_PACKETS_TO_CLI"]))
+LOG_PM_PACKETS_TO_FILE = bool(_config.get("LOG_PM_PACKETS_TO_FILE", DEFAULT_CONFIG["LOG_PM_PACKETS_TO_FILE"]))
 SCAN_CHANNELS_LIMIT = int(_config.get("SCAN_CHANNELS_LIMIT", DEFAULT_CONFIG["SCAN_CHANNELS_LIMIT"]))
 WORK_ON = _config.get("WORK_ON", DEFAULT_CONFIG["WORK_ON"]) or None
+WORK_ON_PRIVATE_MSGS = bool(_config.get("WORK_ON_PRIVATE_MSGS", DEFAULT_CONFIG["WORK_ON_PRIVATE_MSGS"]))
+PRIVATE_MSGS_CFG = _config.get("PRIVATE_MSGS_CFG", DEFAULT_CONFIG["PRIVATE_MSGS_CFG"]) or None
 
 logger = logging.getLogger("meshcore_client")
 meshcore = None
@@ -178,6 +191,8 @@ class MeshcoreBot:
             )
         )
         self.external_callbacks = [] # здесь храним коллбэки
+        # переключатель режима обработки прямых сообщений
+        self.pm_mode = bool(self.config.get("WORK_ON_PRIVATE_MSGS", False))
 
         # нужно проверить существование токена
         # закомментируем, т.к. на конфигах с только mesh-каналами и ботами для них токен задан не будет, соотв. воркер не стартанет
@@ -252,6 +267,58 @@ class MeshcoreBot:
         
         # Инициализация класса прошла
         print(f"async_init() Ok. Выполнена async_init от worker #{self.worker_index}")
+        
+        return result
+    
+    async def async_init_pm(self):
+        result = False
+
+        if not self.selfcheck_is_correct:
+            result = False
+            print(f"async_init(): не выполняем загрузку, self.selfcheck_is_correct == False, async_init_pm от worker #{self.worker_index}")
+            return result
+        
+        # работаем только в режиме приватных сообщений
+        if not self.pm_mode:
+            result = False
+            print(f"async_init(): pm-worker - не выполняем загрузку, self.pm_mode == False, async_init_pm от worker #{self.worker_index}")
+            return result
+        
+        # кэш отправленных сообщений из poll в tg для дедупликации
+        self.received_pm_cache: Dict[str, float] = {}
+        self.received_pm_cache_ttl = 300
+
+        # установка внешних коллбэков
+        # проверим, что опция включена, и что задано имя файла
+        if self.mesh_messages_callback_enabled == True and isinstance(self.mesh_messages_callback_file, str) and self.mesh_messages_callback_file:
+            
+            # проверим ,что файл существует и доступен для чтения
+            if os.path.isfile(self.mesh_messages_callback_file) and os.access(self.mesh_messages_callback_file, os.R_OK):
+                if isinstance(self.mesh_messages_callback_list, set) and len(self.mesh_messages_callback_list):
+                    loaded = self.load_callbacks_from_file()
+                    logger.info(f"async_init_pm(): Результат self.load_callbacks_from_file(): {loaded}")
+                else:
+                    logger.warning("async_init_pm(): Файл %s прочитан, но не имеет коллбэков", self.mesh_messages_callback_file)
+            else:
+                logger.warning("async_init_pm(): Невозможно загрузить внешние коллбэки - файл %s недоступен для чтения или не существует", self.mesh_messages_callback_file)
+
+        # Get your contacts
+        contacts_raw_result = await meshcore.commands.get_contacts()
+        if contacts_raw_result.type == EventType.ERROR:
+            print(f"Error getting contacts: {contacts_raw_result.payload}")
+        else:
+            self.contacts = contacts_raw_result.payload
+            print(f"Found {len(self.contacts)} contacts")
+        
+        # Subscribe to private messages
+        self.channel_subscription = meshcore.subscribe(EventType.CONTACT_MSG_RECV, self.pm_callback)
+
+        print(f"\async_init_pm(): Worker #{self.worker_index}: Subscribed to private msgs")
+
+        result = True
+        
+        # Инициализация класса прошла
+        print(f"async_init_pm() Ok. Выполнена async_init_pm от pm-worker #{self.worker_index}")
         
         return result
     
@@ -406,6 +473,94 @@ class MeshcoreBot:
 
         else:
             print(f"Сообщение «{msg_text}» получено в канал с отличающимся ch_id ({ch_id} / {self.target_channel_id}), пропускаем его")
+
+    async def pm_callback(self, event):
+        msg_text = event.payload['text']
+        debug_data = dict(vars(event))
+
+        data = event.payload
+        contact = self.meshcore.get_contact_by_key_prefix(data['pubkey_prefix'])
+
+        print(f"\n\n\n*************************************************************")
+        if contact:
+            print(f"Received Private message from «{contact['adv_name']}»: ")
+        else:
+            print(f"Received Private message from unknown: ")
+        print(f"\n{msg_text}\n")
+        print(f"From (pubkey prefix): {data['pubkey_prefix']}")
+        print(f"Type: {event.payload['type']}")
+
+        dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
+        print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
+
+        debug_data = dict(vars(event))
+
+        if LOG_PM_PACKETS_TO_FILE:
+            debug_data['Timestamp'] = str(dt.strftime("%d.%m.%Y %H:%M:%S")) + " ({event.payload['sender_timestamp']})"
+            # добавить данные о контакте - ключ и имя
+            if contact:
+                debug_data['contact'] = copy.deepcopy(contact)
+            self.log_packet_to_file(debug_data, "meshcore_packets_pms.log")
+
+        if LOG_PACKETS_TO_CLI:
+            print("Дамп полученного пакета:\n", json.dumps(debug_data, indent=4, ensure_ascii=False, default=str))
+
+        # врезка для дедупликации - иногда приходят одни и те же копии сообщения по нескольку раз, с одной временной меткой и текстом
+        already_sent = False
+        msg_key = self.make_message_key(dict(vars(event)))
+
+        # проверка в кэше
+        await self.cleanup_received_pm_cache()
+
+        if msg_key in self.received_pm_cache:
+            # Сообщение уже отправлялось
+            already_sent = True
+
+        # резервируем ключ заранее, чтобы другие корутины не отправили дубль
+        self.received_pm_cache[msg_key] = time.time()
+        
+        # если проверка на кэш не прошла, уведомим пользователя и не будем обрабатывать сообщение коллбэками
+        if already_sent:
+            print(f"Сообщение уже обрабатывалось - пропускаем его")
+            return False
+
+        # а теперь - обработка внешних коллбэков, завязана на опцию MESH_MESSAGES_CALLBACK_ENABLED
+        if self.mesh_messages_callback_enabled == True and isinstance(self.external_callbacks, list) and len(self.external_callbacks):
+            for external_cbk in self.external_callbacks:
+                # external_cbk_result = await external_cbk(self, event)
+                # print(f"            Результат вызова {external_cbk.__name__} = {external_cbk_result}")
+                asyncio.create_task(external_cbk(self, event)).add_done_callback(partial(self.async_event_callback_on_done, callable_func_name=external_cbk.__name__))
+
+    # возвращает хэш сообщения из chat_id, даты и текста
+    def make_message_key(self, msg_dict: dict) -> str:
+        
+        try:
+            # if sent_to_tg_cache_key_elems:
+            #     fields = sent_to_tg_cache_key_elems
+            # else:
+            #     fields = ['chat_id', 'msg']
+            #     print(f"sent_to_tg_cache_key_elems пуст, сбросили до дефолтного \n{fields}")
+            fields = ['pubkey_prefix', 'text', 'sender_timestamp']
+            payload = msg_dict.get("payload", None)
+            if not payload:
+                return ""
+
+            raw = "|".join(str(payload.get(field, "")) for field in fields)
+            normalized = " ".join(raw.split())
+            return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        except Exception as e:
+            print(f"make_message_key(): ошибка", e)
+            return ""
+
+    # функция для поиска и удаления устаревших хэшей из кэша отправленных в tg сообщений
+    async def cleanup_received_pm_cache(self):
+        now = time.time()
+        expired_keys = [
+            key for key, ts in self.received_pm_cache.items()
+            if now - ts > self.received_pm_cache_ttl
+        ]
+        for key in expired_keys:
+            del self.received_pm_cache[key]
 
     # отправляет в канал ответное сообщение
     async def send_channel_reply(self, channel_id: int, text: str, packet: dict, received_msg_text: str):
@@ -589,12 +744,18 @@ class MeshcoreBot:
                 else:
                     logger.warning("HTTP pre-poll запрос неудачный: resp=", resp)
 
-    def log_packet_to_file(self, debug_data: dict) -> None:
+    def log_packet_to_file(self, debug_data: dict, log_filename: str) -> None:
         # logger = logging.getLogger("meshcore_client")
         try:
+            if not log_filename:
+                log_filename = "meshcore_packets.log"
+
+            # добавим подпапку
+            log_filename = "logs/" + log_filename
+
             # Папка скрипта
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            log_file = os.path.join(script_dir, "meshcore_packets.log")
+            log_file = os.path.join(script_dir, log_filename)
 
             # Записываем в файл (добавление)
             with open(log_file, "a", encoding="utf-8") as f:
@@ -1170,6 +1331,24 @@ async def main():
                 tb = traceback.format_exc()
                 print(tb)
     
+    # поддержка личных сообщений
+    if WORK_ON_PRIVATE_MSGS:
+        try:
+            # создадим экземпляр воркера
+            global PRIVATE_MSGS_CFG
+            PRIVATE_MSGS_CFG['WORK_ON_PRIVATE_MSGS'] = WORK_ON_PRIVATE_MSGS
+            bot = MeshcoreBot(meshcore, -1, PRIVATE_MSGS_CFG)
+            if getattr(bot, "selfcheck_is_correct", False):
+                await bot.async_init_pm()
+                WORKERS.append(bot)
+            else:
+                print(f"Воркер приватных сообщений #{worker_index} selfcheck_is_correct не равен true, пропускаем")
+        except Exception as e:
+            print(f"Произошла ошибка: {e}")
+            tb = traceback.format_exc()
+            print(tb)
+    
+    # работаем дальше
     await meshcore.commands.send_advert(flood=True)
     
     # Subscribe to private messages
