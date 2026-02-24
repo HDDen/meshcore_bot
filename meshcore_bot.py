@@ -744,7 +744,7 @@ class MeshcoreBot:
                 else:
                     logger.warning("HTTP pre-poll запрос неудачный: resp=", resp)
 
-    def log_packet_to_file(self, debug_data: dict, log_filename: str) -> None:
+    def log_packet_to_file(self, debug_data: dict, log_filename: str = "") -> None:
         # logger = logging.getLogger("meshcore_client")
         try:
             if not log_filename:
