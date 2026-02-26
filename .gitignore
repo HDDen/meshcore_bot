@@ -3,3 +3,7 @@ meshcore_config.json
 __pycache__/*
 callbacks.py
 meshcore_packets.log
+meshcore_packets_pms.log
+logs/*
+!logs
+callbacks_pm.py
