@@ -4,6 +4,6 @@ __pycache__/*
 callbacks.py
 meshcore_packets.log
 meshcore_packets_pms.log
-logs/*
 !logs
+logs/*
 callbacks_pm.py
