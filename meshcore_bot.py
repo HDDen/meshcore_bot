@@ -137,6 +137,9 @@ meshcore = None
 # сюда сохраним активные воркеры
 WORKERS: list["MeshcoreBot"] = []
 
+# сюда - последний пакет воркера, т.к. в self хранить не удастся, он не апдейтится
+WORKERS_LAST_RX_PACKETS = {}
+
 # основной рабочий класс
 class MeshcoreBot:
     def __init__(self, meshcore, worker_index, config) -> None:
@@ -376,16 +379,19 @@ class MeshcoreBot:
 
         msg_text = event.payload['text']
         ch_id = event.payload.get('channel_idx', None)
+        pathinfo = WORKERS_LAST_RX_PACKETS
 
         print(f"\n\n\n*************************************************************\nReceived message: \n{msg_text}\n\n")
         print(f"Type: {event.payload['type']}")
         print(f"From: {event.payload.get('pubkey_prefix', 'channel')}")
         print(f"Channel_idx: {ch_id}")
+        print(f"Pathinfo: \n{pathinfo}")
 
         dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
         print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
 
-        debug_data = dict(vars(event))
+        #debug_data = dict(vars(event))
+        debug_data = {**dict(vars(event)), **pathinfo}
 
         if LOG_PACKETS_TO_FILE:
             self.log_packet_to_file(debug_data)
@@ -476,7 +482,7 @@ class MeshcoreBot:
 
     async def pm_callback(self, event):
         msg_text = event.payload['text']
-        debug_data = dict(vars(event))
+        pathinfo = WORKERS_LAST_RX_PACKETS
 
         data = event.payload
         contact = self.meshcore.get_contact_by_key_prefix(data['pubkey_prefix'])
@@ -489,11 +495,13 @@ class MeshcoreBot:
         print(f"\n{msg_text}\n")
         print(f"From (pubkey prefix): {data['pubkey_prefix']}")
         print(f"Type: {event.payload['type']}")
+        print(f"Pathinfo: \n{pathinfo}")
 
         dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
         print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
 
-        debug_data = dict(vars(event))
+        #debug_data = dict(vars(event))
+        debug_data = {**dict(vars(event)), **pathinfo}
 
         if LOG_PM_PACKETS_TO_FILE:
             debug_data['Timestamp'] = str(dt.strftime("%d.%m.%Y %H:%M:%S")) + " ({event.payload['sender_timestamp']})"
@@ -1165,10 +1173,22 @@ class MeshcoreBot:
             # time.sleep(self.http_poll_period_seconds)
             await asyncio.sleep(self.http_poll_period_seconds)
 
+    def get_latest_pathinfo(self):
+        result = {}
+
+        try:
+            result = WORKERS_LAST_RX_PACKETS
+        except Exception as e:
+            print(f"Произошла ошибка: {e}")
+            tb = traceback.format_exc()
+            print(tb)
+        
+        return result
+
     def unsubscribe(self):
         if self.channel_subscription:
             self.meshcore.unsubscribe(self.channel_subscription)
-            print(f"Unsubscribed events on worker #{self.worker_index}")
+            print(f"Unsubscribed channel events on worker #{self.worker_index}")
 
 # заменяет значения переданных ключей в плоском объекте на плейсхолдер, полезно для последующего вывода в лог
 def protect_dict_values(src_dict: dict, keys_list: list, placeholder: str = "***"):
@@ -1208,6 +1228,107 @@ def do_post_request(url: str, payload: Optional[dict] = None, timeout: int = 10,
     except Exception as e:
         print(f"do_post_request(): POST завершился с ошибкой или таймаутом: \n{e}")
         result = None
+
+    return result
+
+async def handle_rx_log_data(event):
+    global WORKERS_LAST_RX_PACKETS
+
+    rx = event.payload or {}
+    raw = rx.get("payload")  # use 'payload' (not 'raw_hex') for this parser
+    snr = rx.get("snr", None)
+    rssi = rx.get("rssi", None)
+    if not raw:
+        return
+
+    parsed = parse_rx_log_data(raw)
+    parsed['SNR'] = snr
+    parsed['RSSI'] = rssi
+
+    if parsed:
+        WORKERS_LAST_RX_PACKETS = format_pathinfo(parsed)
+
+def parse_rx_log_data(payload: Any) -> dict[str, Any]:
+    """Parse RX_LOG event payload to extract LoRa packet details.
+
+    Expected format (hex):
+    byte0: header
+    byte1: path_len
+    next path_len bytes: path nodes
+    next byte: channel_hash (optional)
+    """
+    result: dict[str, Any] = {}
+
+    try:
+        hex_str = None
+
+        if isinstance(payload, dict):
+            hex_str = payload.get("payload") or payload.get("raw_hex")
+        elif isinstance(payload, (str, bytes)):
+            hex_str = payload
+
+        if not hex_str:
+            return result
+
+        if isinstance(hex_str, bytes):
+            hex_str = hex_str.hex()
+
+        hex_str = str(hex_str).lower().replace(" ", "").replace("\n", "").replace("\r", "")
+
+        if len(hex_str) < 4:
+            return result
+
+        result["header"] = hex_str[0:2]
+
+        try:
+            path_len = int(hex_str[2:4], 16)
+            result["path_len"] = path_len
+        except ValueError:
+            return {}
+
+        path_start = 4
+        path_end = path_start + (path_len * 2)
+
+        if len(hex_str) < path_end:
+            return {}
+
+        path_hex = hex_str[path_start:path_end]
+        result["path"] = path_hex
+        result["path_nodes"] = [path_hex[i:i + 2] for i in range(0, len(path_hex), 2)]
+
+        if len(hex_str) >= path_end + 2:
+            result["channel_hash"] = hex_str[path_end:path_end + 2]
+
+    except Exception as ex:
+        logger.debug(f"Error parsing RX_LOG data: {ex}")
+
+    return result
+
+def format_pathinfo(parsed: dict[str, Any]) -> str:
+    """Return obj in format"""
+
+    result = {
+        "path_len": None,
+        "nodes": None,
+        "SNR": None,
+        "RSSI": None,
+    }
+
+    path_len = parsed.get("path_len", None)
+    nodes = parsed.get("path_nodes", None)
+    snr = parsed.get("SNR", None)
+    rssi = parsed.get("RSSI", None)
+
+    if path_len:
+        result["path_len"] = path_len
+    if path_len == 0:
+        result["path_len"] = 0
+
+    if isinstance(nodes, list):
+        result["nodes"] = nodes
+
+    result["SNR"] = snr
+    result["RSSI"] = rssi
 
     return result
 
@@ -1337,7 +1458,7 @@ async def main():
             # создадим экземпляр воркера
             global PRIVATE_MSGS_CFG
             PRIVATE_MSGS_CFG['WORK_ON_PRIVATE_MSGS'] = WORK_ON_PRIVATE_MSGS
-            bot = MeshcoreBot(meshcore, -1, PRIVATE_MSGS_CFG)
+            bot = MeshcoreBot(meshcore, len(WORKERS), PRIVATE_MSGS_CFG)
             if getattr(bot, "selfcheck_is_correct", False):
                 await bot.async_init_pm()
                 WORKERS.append(bot)
@@ -1347,6 +1468,9 @@ async def main():
             print(f"Произошла ошибка: {e}")
             tb = traceback.format_exc()
             print(tb)
+    
+    # Subscribe to rx_log
+    rxlogdata_evt_handler = meshcore.subscribe(EventType.RX_LOG_DATA, handle_rx_log_data)
     
     # работаем дальше
     await meshcore.commands.send_advert(flood=True)
@@ -1391,6 +1515,8 @@ async def main():
         # Clean up subscriptions
         for worket_index, worker_entity in enumerate(WORKERS):
             worker_entity.unsubscribe()
+
+        rxlogdata_evt_handler.unsubscribe()
         
         # Stop auto-message fetching
         await meshcore.stop_auto_message_fetching()
