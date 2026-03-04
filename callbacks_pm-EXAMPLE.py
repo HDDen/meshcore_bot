@@ -57,6 +57,8 @@ async def example_pm_callback(bot_instance, event):
         # отправим ответ
         if contact and (contact_pubkey[:12] == "012345678000"):
 
-            result = await bot_instance.meshcore.commands.send_msg(contact, "Hello from Python!")
+            #result = await bot_instance.meshcore.commands.send_msg(contact, "Hello from Python!")
+            # отправка с попытками и запросом доставки
+            result = await bot_instance.meshcore.commands.send_msg_with_retry(contact, "Hello from Python!")
 
     return result

@@ -92,7 +92,8 @@ DEFAULT_CONFIG = {
         "MESH_MESSAGES_CALLBACK_ENABLED": False,
         "MESH_MESSAGES_CALLBACK_FILE": "callbacks_pm.py",
         "MESH_MESSAGES_CALLBACK_LIST": ["example_pm_callback"], # фильтрация "кому отвечать" должна реализовываться в самом коллбэке
-    }
+    },
+    "COLLECTED_RXPACKETS_LIMIT": 500
 }
 
 def load_or_create_config(path: str) -> dict:
@@ -130,6 +131,7 @@ SCAN_CHANNELS_LIMIT = int(_config.get("SCAN_CHANNELS_LIMIT", DEFAULT_CONFIG["SCA
 WORK_ON = _config.get("WORK_ON", DEFAULT_CONFIG["WORK_ON"]) or None
 WORK_ON_PRIVATE_MSGS = bool(_config.get("WORK_ON_PRIVATE_MSGS", DEFAULT_CONFIG["WORK_ON_PRIVATE_MSGS"]))
 PRIVATE_MSGS_CFG = _config.get("PRIVATE_MSGS_CFG", DEFAULT_CONFIG["PRIVATE_MSGS_CFG"]) or None
+COLLECTED_RXPACKETS_LIMIT = int(_config.get("COLLECTED_RXPACKETS_LIMIT", DEFAULT_CONFIG["COLLECTED_RXPACKETS_LIMIT"]))
 
 logger = logging.getLogger("meshcore_client")
 meshcore = None
@@ -139,6 +141,9 @@ WORKERS: list["MeshcoreBot"] = []
 
 # сюда - последний пакет воркера, т.к. в self хранить не удастся, он не апдейтится
 WORKERS_LAST_RX_PACKETS = {}
+
+# сюда загрузим контакты
+NODE_CONTACTS = {}
 
 # основной рабочий класс
 class MeshcoreBot:
@@ -304,14 +309,6 @@ class MeshcoreBot:
                     logger.warning("async_init_pm(): Файл %s прочитан, но не имеет коллбэков", self.mesh_messages_callback_file)
             else:
                 logger.warning("async_init_pm(): Невозможно загрузить внешние коллбэки - файл %s недоступен для чтения или не существует", self.mesh_messages_callback_file)
-
-        # Get your contacts
-        contacts_raw_result = await meshcore.commands.get_contacts()
-        if contacts_raw_result.type == EventType.ERROR:
-            print(f"Error getting contacts: {contacts_raw_result.payload}")
-        else:
-            self.contacts = contacts_raw_result.payload
-            print(f"Found {len(self.contacts)} contacts")
         
         # Subscribe to private messages
         self.channel_subscription = meshcore.subscribe(EventType.CONTACT_MSG_RECV, self.pm_callback)
@@ -379,19 +376,31 @@ class MeshcoreBot:
 
         msg_text = event.payload['text']
         ch_id = event.payload.get('channel_idx', None)
-        pathinfo = WORKERS_LAST_RX_PACKETS
-
-        print(f"\n\n\n*************************************************************\nReceived message: \n{msg_text}\n\n")
-        print(f"Type: {event.payload['type']}")
-        print(f"From: {event.payload.get('pubkey_prefix', 'channel')}")
-        print(f"Channel_idx: {ch_id}")
-        print(f"Pathinfo: \n{pathinfo}")
-
-        dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
-        print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
+        pathinfo = copy.deepcopy(WORKERS_LAST_RX_PACKETS)
 
         #debug_data = dict(vars(event))
         debug_data = {**dict(vars(event)), **pathinfo}
+        dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
+
+        payload = event.payload
+        payload_snr = payload.get("SNR", None)
+        payload_path_len = payload.get("path_len", None)
+
+        print(f"\n\n\n*************************************************************")
+        print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
+        print(f"\nReceived message: \n{msg_text}\n\n")
+        print(f"Type: {event.payload['type']}")
+        print(f"From: {event.payload.get('pubkey_prefix', 'channel')}")
+        print(f"Channel_idx: {ch_id}")
+        if payload_snr is not None:
+            print(f"Payload SNR: {payload_snr}")
+        else: 
+            print(f"Payload SNR: ?")
+        if payload_path_len is not None:
+            print(f"Payload path_len: {payload_path_len}")
+        else:
+            print(f"Payload path_len: ?")
+        print(f"Pathinfo: {pathinfo}")
 
         if LOG_PACKETS_TO_FILE:
             self.log_packet_to_file(debug_data)
@@ -458,8 +467,8 @@ class MeshcoreBot:
                         # вывести в функцию, с передачей debug_data в качестве исходного пакета
                         if self.reply_to_mesh_msg_delay_seconds:
                             print(f"Выжидаем {self.reply_to_mesh_msg_delay_seconds} перед отправкой ответа")
-                            time.sleep(float(self.reply_to_mesh_msg_delay_seconds))
-                            #await asyncio.sleep(float(self.reply_to_mesh_msg_delay_seconds))
+                            #time.sleep(float(self.reply_to_mesh_msg_delay_seconds))
+                            await asyncio.sleep(float(self.reply_to_mesh_msg_delay_seconds))
 
                         reply_result = await self.send_channel_reply(self.target_channel_id, self.reply_to_mesh_msg_txt, debug_data.copy(), msg_text)
 
@@ -475,19 +484,28 @@ class MeshcoreBot:
                 for external_cbk in self.external_callbacks:
                     # external_cbk_result = await external_cbk(self, event)
                     # print(f"            Результат вызова {external_cbk.__name__} = {external_cbk_result}")
-                    asyncio.create_task(external_cbk(self, event)).add_done_callback(partial(self.async_event_callback_on_done, callable_func_name=external_cbk.__name__))
+                    asyncio.create_task(external_cbk(self, event, pathinfo)).add_done_callback(partial(self.async_event_callback_on_done, callable_func_name=external_cbk.__name__))
 
         else:
             print(f"Сообщение «{msg_text}» получено в канал с отличающимся ch_id ({ch_id} / {self.target_channel_id}), пропускаем его")
 
     async def pm_callback(self, event):
         msg_text = event.payload['text']
-        pathinfo = WORKERS_LAST_RX_PACKETS
+        pathinfo = copy.deepcopy(WORKERS_LAST_RX_PACKETS)
+
+        #debug_data = dict(vars(event))
+        debug_data = {**dict(vars(event)), **pathinfo}
+        dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
+
+        payload = event.payload
+        payload_snr = payload.get("SNR", None)
+        payload_path_len = payload.get("path_len", None)
 
         data = event.payload
         contact = self.meshcore.get_contact_by_key_prefix(data['pubkey_prefix'])
 
         print(f"\n\n\n*************************************************************")
+        print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
         if contact:
             print(f"Received Private message from «{contact['adv_name']}»: ")
         else:
@@ -495,13 +513,15 @@ class MeshcoreBot:
         print(f"\n{msg_text}\n")
         print(f"From (pubkey prefix): {data['pubkey_prefix']}")
         print(f"Type: {event.payload['type']}")
-        print(f"Pathinfo: \n{pathinfo}")
-
-        dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
-        print(f"Timestamp: {dt.strftime("%d.%m.%Y %H:%M:%S")} ({event.payload['sender_timestamp']})")
-
-        #debug_data = dict(vars(event))
-        debug_data = {**dict(vars(event)), **pathinfo}
+        if payload_snr is not None:
+            print(f"Payload SNR: {payload_snr}")
+        else: 
+            print(f"Payload SNR: ?")
+        if payload_path_len is not None:
+            print(f"Payload path_len: {payload_path_len}")
+        else:
+            print(f"Payload path_len: ?")
+        print(f"Pathinfo: {pathinfo}")
 
         if LOG_PM_PACKETS_TO_FILE:
             debug_data['Timestamp'] = str(dt.strftime("%d.%m.%Y %H:%M:%S")) + " ({event.payload['sender_timestamp']})"
@@ -537,7 +557,7 @@ class MeshcoreBot:
             for external_cbk in self.external_callbacks:
                 # external_cbk_result = await external_cbk(self, event)
                 # print(f"            Результат вызова {external_cbk.__name__} = {external_cbk_result}")
-                asyncio.create_task(external_cbk(self, event)).add_done_callback(partial(self.async_event_callback_on_done, callable_func_name=external_cbk.__name__))
+                asyncio.create_task(external_cbk(self, event, pathinfo)).add_done_callback(partial(self.async_event_callback_on_done, callable_func_name=external_cbk.__name__))
 
     # возвращает хэш сообщения из chat_id, даты и текста
     def make_message_key(self, msg_dict: dict) -> str:
@@ -577,7 +597,7 @@ class MeshcoreBot:
         if text == "" and packet and packet.get("payload"):
             # если у нас пустой текст - отправим количество хопов
             logger.info("Ответ на mesh-сообщение включен, но текст не задан - вернём количество хопов")
-            payload = packet.get("payload", {})
+            payload = packet
             final_send_text = payload.get('path_len', '')
             if final_send_text == "":
                 final_send_text = "?hops"
@@ -904,8 +924,8 @@ class MeshcoreBot:
 
                     if self.target_channel_id is not None:
                         # short delay to avoid flooding
-                        time.sleep(2)
-                        #await asyncio.sleep(2)
+                        #time.sleep(2)
+                        await asyncio.sleep(2)
 
                         for part in parts:
                             try:
@@ -920,8 +940,8 @@ class MeshcoreBot:
                                     print("\nMsg translated to Mesh", result, "\n")
                                 
                                 # short delay to avoid flooding
-                                time.sleep(4)
-                                #await asyncio.sleep(4)
+                                #time.sleep(4)
+                                await asyncio.sleep(4)
 
                             except Exception as exc:
                                 logger.exception("\nОшибка при отправке polled message: %s", exc, "\n")
@@ -1177,14 +1197,100 @@ class MeshcoreBot:
         result = {}
 
         try:
-            result = WORKERS_LAST_RX_PACKETS
+            result = copy.deepcopy(WORKERS_LAST_RX_PACKETS)
         except Exception as e:
             print(f"Произошла ошибка: {e}")
             tb = traceback.format_exc()
             print(tb)
         
         return result
+    
+    # изъять из таблицы контактов подходящие по префиксу ключа репитеры
+    def get_repeater_contacts_by_key(self, key: str, limit: int = 0) -> dict:
+        result = {}
+        count = 0
 
+        # проверка ключа для поиска
+        if not isinstance(key, str) or len(key) < 2:
+            print(f"Строка должна быть длиной не менее 2 символов, получена «{key}»")
+            return result
+
+        # проверка списка контактов
+        contacts = self.get_node_contacts()
+        if not isinstance(contacts, dict):
+            print("contacts должен быть словарём")
+            return result
+        
+        # Проверка limit
+        if not isinstance(limit, int) or limit < 0:
+            print("limit должен быть целым числом >= 0")
+            return result
+
+        for pubkey, value in contacts.items():
+            if (
+                isinstance(pubkey, str)
+                and pubkey.startswith(key)
+                and len(pubkey) >= len(key)
+                and isinstance(value, dict)
+                and value.get("type") == 2
+            ):
+                result[pubkey] = value.copy()  # копируем элемент
+                count += 1
+
+                # Если limit установлен и достигнут — выходим
+                if limit > 0 and count >= limit:
+                    break
+
+        return result
+    
+    # получить имена репитеров, подходящие под индекс ключа
+    def get_repeater_names_by_keyprefix(self, key: str):
+        result = []
+
+        # проверка ключа для поиска
+        if not isinstance(key, str) or len(key) < 2:
+            print(f"Строка должна быть длиной не менее 2 символов, получена «{key}»")
+            return result
+        
+        matched_repeaters = self.get_repeater_contacts_by_key(key)
+        if not isinstance(matched_repeaters, dict) or not matched_repeaters:
+            print("matched_repeaters должен быть словарём")
+            return result
+
+        for value in matched_repeaters.values():
+            if isinstance(value, dict):
+                adv_name = value.get("adv_name")
+                if adv_name is not None:
+                    result.append(adv_name)
+
+        return result
+    
+    # получит имя первого подходящего по ключу репитера
+    def get_first_match_repeater_name_by_keyprefix(self, key: str):
+        result = ""
+
+        # проверка ключа для поиска
+        if not isinstance(key, str) or len(key) < 2:
+            print(f"Строка должна быть длиной не менее 2 символов, получена «{key}»")
+            return result
+        
+        matched_repeaters = self.get_repeater_names_by_keyprefix(key)
+        if isinstance(matched_repeaters, list) and matched_repeaters:
+            result = str(matched_repeaters[0])
+    
+        return result
+
+    # получит список всех контактов ноды
+    def get_node_contacts(self):
+        global NODE_CONTACTS
+        return NODE_CONTACTS
+    
+    def remove_vowels(self, text):
+        vowels = set("aeiouyAEIOUYаеёиоуыэюяАЕЁИОУЫЭЮЯ")
+        text = text[0] + "".join(c for c in text[1:] if c not in vowels and c != " ")
+        return text
+
+    # отменяет подписки воркера
     def unsubscribe(self):
         if self.channel_subscription:
             self.meshcore.unsubscribe(self.channel_subscription)
@@ -1238,12 +1344,15 @@ async def handle_rx_log_data(event):
     raw = rx.get("payload")  # use 'payload' (not 'raw_hex') for this parser
     snr = rx.get("snr", None)
     rssi = rx.get("rssi", None)
+    payload_length = rx.get("payload_length", None)
     if not raw:
         return
 
     parsed = parse_rx_log_data(raw)
     parsed['SNR'] = snr
     parsed['RSSI'] = rssi
+    parsed['payload'] = raw
+    parsed['payload_length'] = payload_length
 
     if parsed:
         WORKERS_LAST_RX_PACKETS = format_pathinfo(parsed)
@@ -1312,12 +1421,16 @@ def format_pathinfo(parsed: dict[str, Any]) -> str:
         "nodes": None,
         "SNR": None,
         "RSSI": None,
+        "payload": None,
+        "payload_length": None,
     }
 
     path_len = parsed.get("path_len", None)
     nodes = parsed.get("path_nodes", None)
     snr = parsed.get("SNR", None)
     rssi = parsed.get("RSSI", None)
+    payload = parsed.get("payload", None)
+    payload_length = parsed.get("payload_length", None)
 
     if path_len:
         result["path_len"] = path_len
@@ -1329,6 +1442,8 @@ def format_pathinfo(parsed: dict[str, Any]) -> str:
 
     result["SNR"] = snr
     result["RSSI"] = rssi
+    result["payload"] = payload
+    result["payload_length"] = payload_length
 
     return result
 
@@ -1348,6 +1463,7 @@ async def main():
     # meshcore = await MeshCore.create_serial(args.port, args.baud, debug=True)
 
     global meshcore
+    global NODE_CONTACTS
     
     if BLE_ADDRESS != _config.get("BLE_ADDRESS", DEFAULT_CONFIG["BLE_ADDRESS"]) and BLE_ADDRESS != "":
         meshcore = await MeshCore.create_ble(BLE_ADDRESS)
@@ -1417,6 +1533,14 @@ async def main():
         await asyncio.gather(*tasks, return_exceptions=True)
 
         return
+    
+    # Get your contacts
+    contacts_raw_result = await meshcore.commands.get_contacts()
+    if contacts_raw_result.type == EventType.ERROR:
+        print(f"Error getting contacts: {contacts_raw_result.payload}")
+    else:
+        NODE_CONTACTS = contacts_raw_result.payload
+        print(f"Found {len(NODE_CONTACTS)} contacts")
     
     # после успешного подключения выведем инфу о ноде
     print("Информация о ноде: \n")

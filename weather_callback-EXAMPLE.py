@@ -8,7 +8,7 @@ import requests
 import time
 import xml.etree.ElementTree as ET
 
-async def weather_callback(bot_instance, event):
+async def weather_callback(bot_instance, event, last_rx_packet: dict = {}):
     """
     Эта функция будет вызвана из основного скрипта.
     """
@@ -298,4 +298,3 @@ def request_and_parse_gismeteo(target_date, with_time = False):
     except ET.ParseError as e:
         print(f"Ошибка при разборе XML: {e}")
         return result
-

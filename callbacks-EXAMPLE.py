@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from meshcore import MeshCore, EventType
 
-async def example_callback(bot_instance, event):
+async def example_callback(bot_instance, event, last_rx_packet: dict = {}):
     """
     Эта функция будет вызвана из основного скрипта.
     """
@@ -82,8 +82,10 @@ async def example_callback(bot_instance, event):
 
     return result
 
+###############
 # показывает help по боту
-async def show_help_callback(bot_instance, event):
+###############
+async def show_help_callback(bot_instance, event, last_rx_packet: dict = {}):
     result = True
 
     msg_text = event.payload['text']
