@@ -379,8 +379,13 @@ class MeshcoreBot:
         pathinfo = copy.deepcopy(WORKERS_LAST_RX_PACKETS)
 
         #debug_data = dict(vars(event))
-        debug_data = {**dict(vars(event)), **pathinfo}
+        #debug_data = {**dict(vars(event)), **pathinfo}
         dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
+        debug_data = {
+            "Timestamp": str(dt.strftime("%d.%m.%Y %H:%M:%S")) + f" ({event.payload['sender_timestamp']})",
+            "event": dict(vars(event)),
+            "pathinfo": dict(pathinfo)
+        }
 
         payload = event.payload
         payload_snr = payload.get("SNR", None)
@@ -494,8 +499,13 @@ class MeshcoreBot:
         pathinfo = copy.deepcopy(WORKERS_LAST_RX_PACKETS)
 
         #debug_data = dict(vars(event))
-        debug_data = {**dict(vars(event)), **pathinfo}
+        #debug_data = {**dict(vars(event)), **pathinfo}
         dt = datetime.fromtimestamp(event.payload['sender_timestamp'])
+        debug_data = {
+            "Timestamp": str(dt.strftime("%d.%m.%Y %H:%M:%S")) + f" ({event.payload['sender_timestamp']})",
+            "event": dict(vars(event)),
+            "pathinfo": dict(pathinfo)
+        }
 
         payload = event.payload
         payload_snr = payload.get("SNR", None)
@@ -524,7 +534,6 @@ class MeshcoreBot:
         print(f"Pathinfo: {pathinfo}")
 
         if LOG_PM_PACKETS_TO_FILE:
-            debug_data['Timestamp'] = str(dt.strftime("%d.%m.%Y %H:%M:%S")) + " ({event.payload['sender_timestamp']})"
             # добавить данные о контакте - ключ и имя
             if contact:
                 debug_data['contact'] = copy.deepcopy(contact)
@@ -1254,7 +1263,7 @@ class MeshcoreBot:
         
         matched_repeaters = self.get_repeater_contacts_by_key(key)
         if not isinstance(matched_repeaters, dict) or not matched_repeaters:
-            print("matched_repeaters должен быть словарём")
+            print(f"matched_repeaters должен быть словарём\n«{matched_repeaters}»")
             return result
 
         for value in matched_repeaters.values():

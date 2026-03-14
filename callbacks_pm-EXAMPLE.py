@@ -1,7 +1,7 @@
 import json
 # import asyncio
 
-async def example_pm_callback(bot_instance, event):
+async def example_pm_callback(bot_instance, event, last_rx_packet: dict = {}):
     result = True
 
     # инфо о пути сообщения
@@ -9,7 +9,11 @@ async def example_pm_callback(bot_instance, event):
     # дебаг-данные
     #debug_data = dict(vars(event))
     # дополним данными о пути пакета
-    debug_data = {**dict(vars(event)), **pathinfo}
+    #debug_data = {**dict(vars(event)), **pathinfo}
+    debug_data = {
+        "event": dict(vars(event)),
+        "pathinfo": dict(pathinfo)
+    }
     print("Дамп полученного пакета:\n", json.dumps(debug_data, indent=4, ensure_ascii=False, default=str))
 
     payload = event.payload

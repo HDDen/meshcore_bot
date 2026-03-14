@@ -298,3 +298,4 @@ def request_and_parse_gismeteo(target_date, with_time = False):
     except ET.ParseError as e:
         print(f"Ошибка при разборе XML: {e}")
         return result
+
