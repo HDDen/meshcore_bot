@@ -1294,6 +1294,42 @@ class MeshcoreBot:
         global NODE_CONTACTS
         return NODE_CONTACTS
     
+    # вернёт массив контактов по имени ноды
+    def get_contacts_by_advname(self, target_adv_name: str, limit: int = 0) -> list:
+        result = []
+        count = 0
+
+        # проверка ключа для поиска
+        if not isinstance(target_adv_name, str) or len(target_adv_name) < 1:
+            print(f"Строка должна быть длиной не менее 1 символа, получена «{target_adv_name}»")
+            return result
+
+        # проверка списка контактов
+        contacts = self.get_node_contacts()
+        if not isinstance(contacts, dict):
+            print("contacts должен быть словарём")
+            return result
+        
+        # Проверка limit
+        if not isinstance(limit, int) or limit < 0:
+            print("limit должен быть целым числом >= 0")
+            return result
+
+        for pubkey, contact_data in contacts.items():
+            if (
+                isinstance(pubkey, str)
+                and isinstance(contact_data, dict)
+                and contact_data.get("adv_name") == target_adv_name
+            ):
+                result.append(contact_data.copy())  # копируем элемент
+                count += 1
+
+                # Если limit установлен и достигнут — выходим
+                if limit > 0 and count >= limit:
+                    break
+
+        return result
+    
     def remove_vowels(self, text):
         vowels = set("aeiouyAEIOUYаеёиоуыэюяАЕЁИОУЫЭЮЯ")
         text = text[0] + "".join(c for c in text[1:] if c not in vowels and c != " ")
